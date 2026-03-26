@@ -21,6 +21,9 @@ def safe_download(ticker):
     try:
         df = yf.download(ticker, period="8mo", progress=False)
 
+        if df is None or df.empty:
+            return pd.DataFrame()
+
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
 
@@ -40,9 +43,11 @@ def indicator(df):
 
     df["VOL_AVG"] = df["Volume"].rolling(20).mean()
 
+    df["TREND_SLOPE"] = df["EMA20"].diff()
+
     return df.dropna()
 
-# ================= STRUCTURE =================
+# ================= MARKET STRUCTURE =================
 def structure(df):
 
     if df["High"].iloc[-1] > df["High"].tail(20).max():
@@ -62,7 +67,7 @@ def swing_plan(df):
     sl = df["Low"].tail(15).min()
     tp = df["High"].tail(40).max()
 
-    rr = (tp-entry)/(entry-sl) if entry>sl else 0
+    rr = (tp-entry)/(entry-sl) if entry > sl else 0
 
     vol_spike = last["Volume"] > last["VOL_AVG"] * 1.5
 
@@ -70,6 +75,8 @@ def swing_plan(df):
     if last["EMA20"] > last["EMA50"]:
         trend_score += 1
     if last["EMA50"] > last["EMA200"]:
+        trend_score += 1
+    if last["TREND_SLOPE"] > 0:
         trend_score += 1
 
     return entry,tp,sl,rr,vol_spike,trend_score
@@ -80,7 +87,7 @@ def backtest(df):
     wins = 0
     total = 0
 
-    for i in range(100, len(df)-30):
+    for i in range(120, len(df)-30):
 
         if df["EMA20"].iloc[i] > df["EMA50"].iloc[i]:
 
@@ -101,12 +108,15 @@ def backtest(df):
 def ai_filter(data):
 
     prompt = f"""
-    Kamu analis hedge fund.
+    Kamu analis hedge fund swing trader.
     RR {data['rr']}
     Winrate {data['winrate']}
     TrendScore {data['trend']}
     VolumeSpike {data['vol']}
     Structure {data['structure']}
+
+    Jawab hanya:
+    STRONG BUY / WATCHLIST / AVOID
     """
 
     try:
@@ -115,9 +125,38 @@ def ai_filter(data):
             messages=[{"role":"user","content":prompt}],
             max_tokens=10
         )
-        return chat.choices[0].message.content
+        return chat.choices[0].message.content.strip()
     except:
         return "WATCHLIST"
+
+# ================= AI DESCRIPTION =================
+def ai_description(data):
+
+    prompt = f"""
+    Kamu analis swing trader profesional.
+    Berikan analisa singkat apa yang harus dilakukan investor.
+
+    Data:
+    Risk Reward {data['rr']}
+    Winrate {data['winrate']}
+    TrendScore {data['trend']}
+    VolumeSpike {data['vol']}
+    Structure {data['structure']}
+
+    Buat rekomendasi:
+    Entry sekarang / tunggu pullback / hindari.
+    Maksimal 3 kalimat.
+    """
+
+    try:
+        chat = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=120
+        )
+        return chat.choices[0].message.content.strip()
+    except:
+        return "Analisa AI tidak tersedia."
 
 # ================= CHART =================
 def make_chart(df, ticker):
@@ -157,7 +196,7 @@ def scan():
         winrate = backtest(df)
         struct = structure(df)
 
-        score = rr*10 + trend*10 + winrate/5
+        score = rr*15 + trend*12 + winrate/4 + (5 if vol else 0)
 
         results.append({
             "ticker":ticker,
@@ -183,6 +222,7 @@ def scan():
 def send_discord(data):
 
     verdict = ai_filter(data)
+    desc_ai = ai_description(data)
     chart = make_chart(data["df"], data["ticker"])
 
     files = {"file": open(chart,"rb")}
@@ -200,7 +240,13 @@ def send_discord(data):
 
                     {"name":"💰 Entry","value":str(round(data["entry"],2)),"inline":True},
                     {"name":"✅ TP","value":str(round(data["tp"],2)),"inline":True},
-                    {"name":"🛑 SL","value":str(round(data["sl"],2)),"inline":True}
+                    {"name":"🛑 SL","value":str(round(data["sl"],2)),"inline":True},
+
+                    {"name":"🧠 AI Analisa","value":desc_ai,"inline":False},
+
+                    {"name":"⚠️ Disclaimer",
+                     "value":"Semua informasi trading ini dihasilkan oleh sistem AI MisterX dan bukan merupakan saran investasi. Gunakan sebagai bahan riset tambahan.",
+                     "inline":False}
                 ],
                 "image":{"url":f"attachment://{chart}"}
             }
