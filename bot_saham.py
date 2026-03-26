@@ -4,22 +4,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os, requests, time, json
 from groq import Groq
+from datetime import datetime
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# ================= HUGE INDO UNIVERSE =================
 SCAN_LIST = [
-    "BBCA.JK","BBRI.JK","TLKM.JK","ASII.JK",
-    "ADRO.JK","ANTM.JK","BMRI.JK",
-    "AAPL","NVDA","TSLA","META","MSFT","BTC-USD"
+"BBCA.JK","BBRI.JK","BMRI.JK","BBNI.JK",
+"TLKM.JK","EXCL.JK","ISAT.JK",
+"ASII.JK","AUTO.JK","UNTR.JK",
+"ADRO.JK","ITMG.JK","PTBA.JK","ANTM.JK","MDKA.JK",
+"INCO.JK","TINS.JK",
+"CPIN.JK","JPFA.JK",
+"ICBP.JK","INDF.JK","MYOR.JK",
+"ACES.JK","MAPI.JK","ERA A.JK",
+"SMGR.JK","INTP.JK",
+"AAPL","NVDA","TSLA","META","MSFT","BTC-USD"
 ]
 
 # ================= SAFE DOWNLOAD =================
 def safe_download(ticker):
     try:
-        df = yf.download(ticker, period="8mo", progress=False)
+        df = yf.download(ticker, period="1y", progress=False)
 
         if df is None or df.empty:
             return pd.DataFrame()
@@ -27,9 +36,7 @@ def safe_download(ticker):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
 
-        df = df.dropna()
-        df = df.astype(float)
-
+        df = df.dropna().astype(float)
         return df
     except:
         return pd.DataFrame()
@@ -42,19 +49,22 @@ def indicator(df):
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
     df["VOL_AVG"] = df["Volume"].rolling(20).mean()
-
-    df["TREND_SLOPE"] = df["EMA20"].diff()
+    df["MOMENTUM"] = df["Close"].pct_change(10)
 
     return df.dropna()
 
 # ================= MARKET STRUCTURE =================
 def structure(df):
 
-    if df["High"].iloc[-1] > df["High"].tail(20).max():
-        return "BULLISH STRUCTURE"
+    hh = df["High"].tail(30).max()
+    ll = df["Low"].tail(30).min()
+    last = df.iloc[-1]["Close"]
 
-    if df["Low"].iloc[-1] < df["Low"].tail(20).min():
-        return "BEARISH STRUCTURE"
+    if last >= hh:
+        return "BREAKOUT"
+
+    if last <= ll:
+        return "BREAKDOWN"
 
     return "RANGE"
 
@@ -64,45 +74,85 @@ def swing_plan(df):
     last = df.iloc[-1]
 
     entry = last["EMA20"]
-    sl = df["Low"].tail(15).min()
-    tp = df["High"].tail(40).max()
 
-    rr = (tp-entry)/(entry-sl) if entry > sl else 0
+    sl = df["Low"].tail(20).min()
+    tp = df["High"].tail(60).max()
 
-    vol_spike = last["Volume"] > last["VOL_AVG"] * 1.5
+    if entry <= sl:
+        return None
+
+    rr = (tp-entry)/(entry-sl)
+
+    vol_spike = last["Volume"] > last["VOL_AVG"] * 1.4
 
     trend_score = 0
     if last["EMA20"] > last["EMA50"]:
         trend_score += 1
     if last["EMA50"] > last["EMA200"]:
         trend_score += 1
-    if last["TREND_SLOPE"] > 0:
+    if last["MOMENTUM"] > 0:
         trend_score += 1
 
     return entry,tp,sl,rr,vol_spike,trend_score
 
-# ================= BACKTEST =================
+# ================= STABLE BACKTEST =================
 def backtest(df):
+
+    df_bt = df.tail(250).copy()
 
     wins = 0
     total = 0
 
-    for i in range(120, len(df)-30):
+    for i in range(60, len(df_bt)-25):
 
-        if df["EMA20"].iloc[i] > df["EMA50"].iloc[i]:
+        if df_bt["EMA20"].iloc[i] > df_bt["EMA50"].iloc[i]:
 
-            entry = df["Close"].iloc[i]
-            future = df["Close"].iloc[i+30]
+            entry = df_bt["Close"].iloc[i]
+            future = df_bt["Close"].iloc[i+25]
 
             total += 1
 
-            if future > entry * 1.05:
+            if future > entry * 1.06:
                 wins += 1
 
     if total == 0:
         return 0
 
     return round((wins/total)*100,2)
+
+# ================= FEAR GREED =================
+def fear_greed():
+
+    btc = safe_download("BTC-USD")
+
+    if btc.empty:
+        return "NEUTRAL"
+
+    ret = btc["Close"].pct_change(5).iloc[-1]
+
+    if ret > 0.08:
+        return "EXTREME GREED"
+    if ret > 0.03:
+        return "GREED"
+    if ret < -0.08:
+        return "EXTREME FEAR"
+    if ret < -0.03:
+        return "FEAR"
+
+    return "NEUTRAL"
+
+# ================= GLOBAL TREND =================
+def global_trend():
+
+    spy = safe_download("^GSPC")
+
+    if spy.empty:
+        return "UNKNOWN"
+
+    if spy["Close"].iloc[-1] > spy["EMA50"].iloc[-1]:
+        return "GLOBAL BULL"
+
+    return "GLOBAL BEAR"
 
 # ================= AI FILTER =================
 def ai_filter(data):
@@ -114,6 +164,8 @@ def ai_filter(data):
     TrendScore {data['trend']}
     VolumeSpike {data['vol']}
     Structure {data['structure']}
+    FearGreed {data['fear']}
+    GlobalTrend {data['gtrend']}
 
     Jawab hanya:
     STRONG BUY / WATCHLIST / AVOID
@@ -123,6 +175,7 @@ def ai_filter(data):
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role":"user","content":prompt}],
+            temperature=0,
             max_tokens=10
         )
         return chat.choices[0].message.content.strip()
@@ -134,17 +187,15 @@ def ai_description(data):
 
     prompt = f"""
     Kamu analis swing trader profesional.
-    Berikan analisa singkat apa yang harus dilakukan investor.
+    Berikan analisa singkat tindakan investor.
 
-    Data:
-    Risk Reward {data['rr']}
+    RR {data['rr']}
     Winrate {data['winrate']}
     TrendScore {data['trend']}
-    VolumeSpike {data['vol']}
     Structure {data['structure']}
+    FearGreed {data['fear']}
+    GlobalTrend {data['gtrend']}
 
-    Buat rekomendasi:
-    Entry sekarang / tunggu pullback / hindari.
     Maksimal 3 kalimat.
     """
 
@@ -152,20 +203,20 @@ def ai_description(data):
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role":"user","content":prompt}],
+            temperature=0.2,
             max_tokens=120
         )
         return chat.choices[0].message.content.strip()
     except:
-        return "Analisa AI tidak tersedia."
+        return "AI analisa tidak tersedia."
 
 # ================= CHART =================
 def make_chart(df, ticker):
 
-    plt.figure(figsize=(9,4))
-    plt.plot(df["Close"].tail(120), label="Price")
-    plt.plot(df["EMA20"].tail(120), label="EMA20")
-    plt.plot(df["EMA50"].tail(120), label="EMA50")
-    plt.legend()
+    plt.figure(figsize=(10,4))
+    plt.plot(df["Close"].tail(150))
+    plt.plot(df["EMA20"].tail(150))
+    plt.plot(df["EMA50"].tail(150))
     plt.title(ticker)
 
     file = f"{ticker}.png"
@@ -176,6 +227,9 @@ def make_chart(df, ticker):
 
 # ================= SCAN =================
 def scan():
+
+    fg = fear_greed()
+    gt = global_trend()
 
     results = []
 
@@ -188,7 +242,12 @@ def scan():
 
         df = indicator(df)
 
-        entry,tp,sl,rr,vol,trend = swing_plan(df)
+        plan = swing_plan(df)
+
+        if plan is None:
+            continue
+
+        entry,tp,sl,rr,vol,trend = plan
 
         if rr < 1:
             continue
@@ -196,7 +255,7 @@ def scan():
         winrate = backtest(df)
         struct = structure(df)
 
-        score = rr*15 + trend*12 + winrate/4 + (5 if vol else 0)
+        inst_score = rr*20 + trend*15 + winrate/3 + (8 if vol else 0)
 
         results.append({
             "ticker":ticker,
@@ -208,15 +267,17 @@ def scan():
             "trend":trend,
             "vol":vol,
             "structure":struct,
-            "score":score,
-            "df":df
+            "score":inst_score,
+            "df":df,
+            "fear":fg,
+            "gtrend":gt
         })
 
-        time.sleep(1)
+        time.sleep(0.5)
 
     results = sorted(results, key=lambda x:x["score"], reverse=True)
 
-    return results[:3]
+    return results[:5]
 
 # ================= DISCORD =================
 def send_discord(data):
@@ -232,11 +293,15 @@ def send_discord(data):
             {
                 "title":f"🚀 MISTERX SWING SIGNAL {data['ticker']}",
                 "description":f"🤖 AI Verdict: **{verdict}**",
-                "color":65280,
+                "color":5763719,
                 "fields":[
-                    {"name":"📊 Risk Reward","value":str(round(data["rr"],2)),"inline":True},
+                    {"name":"🌎 Global Trend","value":data["gtrend"],"inline":True},
+                    {"name":"😱 Fear Greed","value":data["fear"],"inline":True},
                     {"name":"🏆 Winrate","value":str(data["winrate"])+"%","inline":True},
+
+                    {"name":"📊 Risk Reward","value":str(round(data["rr"],2)),"inline":True},
                     {"name":"🧱 Structure","value":data["structure"],"inline":True},
+                    {"name":"⚡ Trend Score","value":str(data["trend"]), "inline":True},
 
                     {"name":"💰 Entry","value":str(round(data["entry"],2)),"inline":True},
                     {"name":"✅ TP","value":str(round(data["tp"],2)),"inline":True},
@@ -245,7 +310,7 @@ def send_discord(data):
                     {"name":"🧠 AI Analisa","value":desc_ai,"inline":False},
 
                     {"name":"⚠️ Disclaimer",
-                     "value":"Semua informasi trading ini dihasilkan oleh sistem AI MisterX dan bukan merupakan saran investasi. Gunakan sebagai bahan riset tambahan.",
+                     "value":"Semua informasi ini dihasilkan oleh AI MisterX dan bukan saran investasi.",
                      "inline":False}
                 ],
                 "image":{"url":f"attachment://{chart}"}
@@ -256,24 +321,27 @@ def send_discord(data):
     requests.post(
         DISCORD_WEBHOOK,
         data={"payload_json": json.dumps(payload)},
-        files=files
+        files=files,
+        timeout=30
     )
+
+    os.remove(chart)
 
 # ================= MAIN =================
 def main():
 
-    print("Scanning Swing Market...")
+    print("Scanning Swing Market Fund Mode...")
 
     hasil = scan()
 
     if not hasil:
-        print("Tidak ada signal RR >= 1")
+        print("Tidak ada signal kuat.")
         return
 
     for h in hasil:
         send_discord(h)
 
-    print("Signal terkirim ke Discord.")
+    print("Signal terkirim.")
 
 if __name__ == "__main__":
     main()
