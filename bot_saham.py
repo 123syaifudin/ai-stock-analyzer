@@ -7,109 +7,202 @@ import matplotlib.pyplot as plt
 import json
 from datetime import datetime
 
-# --- KONFIGURASI ---
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# ================= CONFIG =================
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
-# Daftar saham (Bisa ditambah/kurang sesukamu)
+client = Groq(api_key=GROQ_API_KEY)
+
 SCAN_LIST = [
-    "BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "GOTO.JK", "ADRO.JK", "AMRT.JK", "ANTM.JK", "BMRI.JK",
-    "AAPL", "NVDA", "TSLA", "MSFT", "META", "BTC-USD", "ETH-USD"
+    "BBCA.JK","BBRI.JK","TLKM.JK","ASII.JK","GOTO.JK",
+    "ADRO.JK","AMRT.JK","ANTM.JK","BMRI.JK",
+    "AAPL","NVDA","TSLA","MSFT","META","BTC-USD"
 ]
 
+# ================= CHART =================
 def create_chart(ticker, hist, support, resistance):
-    """Membuat grafik dengan garis Support & Resistance"""
     try:
         plt.style.use('dark_background')
-        plt.figure(figsize=(10, 5))
-        
-        # Plot Harga
-        plt.plot(hist.index, hist['Close'], color='#00ff00', linewidth=2, label='Price')
-        plt.fill_between(hist.index, hist['Close'], color='#00ff00', alpha=0.1)
-        
-        # Plot S/R
-        plt.axhline(y=support, color='red', linestyle='--', alpha=0.5, label=f'Support ({support:.0f})')
-        plt.axhline(y=resistance, color='cyan', linestyle='--', alpha=0.5, label=f'Resistance ({resistance:.0f})')
-        
-        plt.title(f"Scanner Signal: {ticker}", fontsize=14, color='white')
-        plt.legend()
-        plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.2)
-        plt.savefig('chart.png', bbox_inches='tight')
+        plt.figure(figsize=(10,5))
+
+        plt.plot(hist.index, hist['Close'], color='#00ff99', linewidth=2)
+        plt.fill_between(hist.index, hist['Close'], alpha=0.1)
+
+        plt.axhline(y=support, color='red', linestyle='--')
+        plt.axhline(y=resistance, color='cyan', linestyle='--')
+
+        plt.title(f"{ticker} Signal Scanner")
+        plt.grid(alpha=0.2)
+
+        plt.savefig("chart.png", bbox_inches='tight')
         plt.close()
         return True
     except Exception as e:
-        print(f"Gagal buat chart: {e}")
+        print("Chart Error:", e)
         return False
 
+# ================= AI ANALYSIS =================
+def ai_analyze(ticker, price, change, vol_ratio):
+    try:
+        prompt = f"""
+        Kamu adalah trader profesional.
+        Analisa singkat saham {ticker}
+
+        Harga sekarang: {price}
+        Perubahan: {change:.2f}%
+        Lonjakan Volume: {vol_ratio:.2f}x
+
+        Berikan kesimpulan:
+        - Bullish / Bearish / Sideways
+        - Potensi entry
+        - Risk level
+        """
+
+        chat = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        return chat.choices[0].message.content
+    except Exception as e:
+        print("AI Error:", e)
+        return "AI Analisa gagal."
+
+# ================= DISCORD =================
+def kirim_discord(data, analisa):
+    try:
+        color = 3066993 if data['change'] >= 0 else 15158332
+
+        txt_market = (
+            f"Price: {data['price']:.2f}\n"
+            f"Change: {data['change']:.2f}%\n"
+            f"Vol Spike: {data['vol_ratio']:.2f}x"
+        )
+
+        txt_sr = (
+            f"Support: {data['support']:.2f}\n"
+            f"Resistance: {data['resistance']:.2f}"
+        )
+
+        txt_news = "\n".join(data['news'])
+
+        payload = {
+            "embeds":[
+                {
+                    "title": f"🚀 SIGNAL SAHAM: {data['ticker']}",
+                    "color": color,
+                    "fields":[
+                        {"name":"📊 Market","value":txt_market,"inline":True},
+                        {"name":"📉 S/R","value":txt_sr,"inline":True},
+                        {"name":"📰 News","value":txt_news,"inline":False},
+                        {"name":"🤖 AI","value":analisa[:1000],"inline":False}
+                    ],
+                    "image":{"url":"attachment://chart.png"}
+                }
+            ]
+        }
+
+        with open("chart.png","rb") as f:
+            files = {"file":("chart.png",f,"image/png")}
+
+            requests.post(
+                DISCORD_WEBHOOK,
+                data={"payload_json":json.dumps(payload)},
+                files=files,
+                timeout=30
+            )
+
+        print("SEND DISCORD SUCCESS")
+
+    except Exception as e:
+        print("Discord Error:", e)
+
+# ================= SCANNER =================
 def scan_market():
-    potensial = []
-    print(f"Scanning {len(SCAN_LIST)} stocks...")
+
+    kandidat = []
+
+    print("Scanning Market...")
 
     for ticker in SCAN_LIST:
         try:
             stock = yf.Ticker(ticker)
-            # Ambil data 1 jam untuk deteksi spike, dan 1 hari untuk S/R
-            df_hourly = stock.history(period="5d", interval="1h")
-            df_daily = stock.history(period="1mo", interval="1d")
-            
-            if df_hourly.empty or len(df_hourly) < 10: continue
 
-            # Hitung Support & Resistance (1 Bulan Terakhir)
-            current_support = df_daily['Low'].min()
-            current_resistance = df_daily['High'].max()
+            df_h = stock.history(period="5d", interval="1h")
+            df_d = stock.history(period="1mo", interval="1d")
 
-            # Logika Anomali
-            last_close = df_hourly['Close'].iloc[-1]
-            change_pct = ((last_close - df_hourly['Close'].iloc[-2]) / df_hourly['Close'].iloc[-2]) * 100
-            
-            last_vol = df_hourly['Volume'].iloc[-1]
-            avg_vol = df_hourly['Volume'].mean()
+            if df_h.empty or len(df_h) < 5:
+                continue
+
+            last_price = df_h['Close'].iloc[-1]
+            prev_price = df_h['Close'].iloc[-2]
+
+            change_pct = ((last_price - prev_price) / prev_price) * 100
+
+            last_vol = df_h['Volume'].iloc[-1]
+            avg_vol = df_h['Volume'].mean()
+
             vol_ratio = last_vol / avg_vol if avg_vol > 0 else 0
 
-            # Filter: Volume Spike > 2x ATAU Perubahan Harga > 3%
-            if vol_ratio > 2.0 or abs(change_pct) > 3.0:
-                potensial.append({
+            support = df_d['Low'].min() if not df_d.empty else last_price*0.95
+            resistance = df_d['High'].max() if not df_d.empty else last_price*1.05
+
+            news_titles = []
+            try:
+                news_titles = [n.get('title','No Title') for n in stock.news[:2]]
+            except:
+                news_titles = ["News tidak tersedia"]
+
+            if vol_ratio > 2 or abs(change_pct) > 3:
+                kandidat.append({
                     "ticker": ticker,
-                    "price": last_close,
+                    "price": last_price,
                     "change": change_pct,
                     "vol_ratio": vol_ratio,
-                    "support": current_support,
-                    "resistance": current_resistance,
-                    "hist": df_hourly.tail(20),
-                    "news": [n.get('title') for n in stock.news[:2]] if stock.news else ["No news"]
+                    "support": support,
+                    "resistance": resistance,
+                    "hist": df_h.tail(30),
+                    "news": news_titles
                 })
-        except: continue
-            
-    return sorted(potensial, key=lambda x: x['vol_ratio'], reverse=True)[:3]
 
-def kirim_discord(data, analisa):
-    color = 3066993 if data['change'] >= 0 else 15158332
-    
-    payload = {
-        "embeds": [{
-            "title": f"🚀 ALERT POTENSIAL: {data['ticker']}",
-            "color": color,
-            "fields": [
-                {
-                    "name": "📊 Data Teknis", 
-                    "value": f"
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
+        except Exception as e:
+            print("Scan Error:", ticker, e)
 
----
+    kandidat = sorted(kandidat, key=lambda x: x['vol_ratio'], reverse=True)
 
-### 💡 Apa yang Baru?
+    return kandidat[:1]   # kirim TOP 1 saja biar tidak spam
 
-* **Logic Support & Resistance:** Bot sekarang melihat data harian (`1mo`) untuk menentukan titik terendah (Support) dan tertinggi (Resistance) selama sebulan terakhir.
-* **Visual Chart:** Grafik sekarang menyertakan garis putus-putus merah (Support) dan cyan (Resistance). Jadi kamu bisa lihat posisi harga sekarang ada di mana terhadap "benteng" harganya.
-* **Target Lebih Masuk Akal:** AI Groq sekarang dipaksa memberikan **TP di area Resistance** dan **SL di bawah Support**, bukan cuma pakai angka persentase buta.
-* **Format Rapi:** Penambahan kolom khusus "Support & Resistance" di Discord agar mata kamu bisa langsung tertuju ke angka krusial.
+# ================= MAIN =================
+def main():
 
----
+    hasil = scan_market()
 
-### Langkah Terakhir
-1.  **Update kode** di GitHub repository kamu.
-2.  Karena kita pakai data harian dan per jam, pastikan **GitHub Actions** kamu berjalan saat bursa sedang aktif atau minimal sehari sekali.
-3.  Jangan lupa cek **GitHub Secrets** apakah `GROQ_API_KEY` dan `DISCORD_WEBHOOK` masih terpasang.
+    if not hasil:
+        print("Tidak ada signal.")
+        return
 
-Apakah kamu ingin saya tambahkan **filter saham khusus** (misal: hanya mau scan saham yang harganya di atas Rp 100,- agar tidak terjebak saham "gocap")?
+    for data in hasil:
+
+        ok = create_chart(
+            data['ticker'],
+            data['hist'],
+            data['support'],
+            data['resistance']
+        )
+
+        if not ok:
+            continue
+
+        analisa = ai_analyze(
+            data['ticker'],
+            data['price'],
+            data['change'],
+            data['vol_ratio']
+        )
+
+        kirim_discord(data, analisa)
+
+if __name__ == "__main__":
+    main()
