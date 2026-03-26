@@ -3,78 +3,83 @@ from groq import Groq
 import os
 import requests
 import pandas as pd
+import matplotlib.pyplot as plt
 
-# Konfigurasi API
-# Pastikan GROQ_API_KEY dan DISCORD_WEBHOOK sudah ada di GitHub Secrets
+# Konfigurasi
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
-def get_data_saham(ticker):
-    stock = yf.Ticker(ticker)
-    # Ambil data 1 bulan terakhir
-    hist = stock.history(period="1mo")
-    
-    # FIX: Cara ambil berita terbaru yang lebih aman
-    news_list = []
-    try:
-        raw_news = stock.news
-        if raw_news:
-            # Mengambil maksimal 3 judul berita
-            news_list = [n.get('title', 'No Title') for n in raw_news[:3]]
-    except:
-        news_list = ["Tidak ada berita terbaru."]
-        
-    return hist, news_list
+# Daftar Scan (Bisa ditambah sesuai keinginan)
+SCAN_LIST = [
+    # Indonesia (LQ45 & Popular)
+    "BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "GOTO.JK", "ADRO.JK", "AMRT.JK", "ANTM.JK", "BMRI.JK",
+    # US & Crypto
+    "AAPL", "NVDA", "TSLA", "MSFT", "META", "BTC-USD", "ETH-USD"
+]
 
-def analisa_ai(ticker, hist, news):
-    # Ringkas data agar hemat token
-    data_summary = hist.tail(10)[['Close', 'Volume']].to_string()
-    
-    # FIX: Menggunakan model terbaru 'llama-3.3-70b-versatile' atau 'llama3-8b-8192'
-    # llama-3.3-70b-versatile adalah model flagship Groq saat ini
-    prompt = f"""
-    Sistem: Anda adalah Pakar Saham & Ahli Bandarmologi Indonesia.
-    Tugas: Analisa saham {ticker} berdasarkan data 10 hari terakhir:
-    {data_summary}
-    Berita Terkait: {news}
+def create_chart(ticker, hist):
+    plt.figure(figsize=(10, 5))
+    plt.plot(hist.index, hist['Close'], label='Price', color='#00ff00', linewidth=2)
+    plt.fill_between(hist.index, hist['Close'], color='#00ff00', alpha=0.1)
+    plt.title(f"Price Action: {ticker}")
+    plt.grid(True, alpha=0.2)
+    plt.savefig('chart.png')
+    plt.close()
 
-    Instruksi Khusus:
-    1. Analisa Volume (VPA): Jika volume naik drastis saat harga sideways/naik, tandai sebagai BIG ACCUMULATION.
-    2. Sentimen: Positif/Negatif/Netral dari berita.
-    3. Trading Plan: Berikan angka ENTRY, TP (Take Profit), dan SL (Stop Loss) yang presisi.
-    4. Jangka Waktu: Tentukan (Scalping/Swing/Inves).
-
-    Balas dengan format Markdown yang rapi untuk Discord.
-    """
+def scanner_potensial():
+    found = []
+    print(f"Memulai Scanning {len(SCAN_LIST)} saham...")
     
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile", # Update model terbaru
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return completion.choices[0].message.content
-
-def main():
-    # Daftar saham (Indo pakai .JK, Luar tanpa akhiran)
-    watchlist = ["BBCA.JK", "GOTO.JK", "TLKM.JK", "NVDA", "AAPL", "BTC-USD"]
+    # Ambil data sekaligus untuk efisiensi
+    data = yf.download(SCAN_LIST, period="5d", interval="1h", group_by='ticker')
     
-    for ticker in watchlist:
+    for ticker in SCAN_LIST:
         try:
-            print(f"Menganalisa {ticker}...")
-            hist, news = get_data_saham(ticker)
+            df = data[ticker].dropna()
+            if len(df) < 5: continue
             
-            if hist.empty:
-                print(f"Data {ticker} kosong, skip.")
-                continue
-                
-            hasil = analisa_ai(ticker, hist, news)
+            # LOGIKA SCANNER: Volume naik 1.5x rata-rata ATAU Harga naik > 2%
+            last_vol = df['Volume'].iloc[-1]
+            avg_vol = df['Volume'].mean()
+            price_change = ((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100
             
-            # Kirim ke Discord
-            msg = {"content": f"## 📈 ANALISA SAHAM: {ticker}\n{hasil}"}
-            requests.post(DISCORD_WEBHOOK, json=msg)
-            print(f"Berhasil mengirim analisa {ticker} ke Discord.")
-            
-        except Exception as e:
-            print(f"Gagal analisa {ticker}: {str(e)}")
+            if last_vol > (avg_vol * 1.5) or abs(price_change) > 2.0:
+                found.append({
+                    "ticker": ticker,
+                    "price": df['Close'].iloc[-1],
+                    "change": price_change,
+                    "vol_spike": last_vol / avg_vol,
+                    "hist": df.tail(10)
+                })
+        except: continue
+    
+    # Urutkan berdasarkan volume spike tertinggi (Top 3 saja agar tidak spam)
+    found = sorted(found, key=lambda x: x['vol_spike'], reverse=True)[:3]
+    return found
 
-if __name__ == "__main__":
-    main()
+def kirim_discord_pro(ticker, analisa, price, change):
+    # Warna: Hijau jika naik, Merah jika turun
+    color = 3066993 if change > 0 else 15158332
+    
+    payload = {
+        "embeds": [{
+            "title": f"🚀 SIGNAL POTENSIAL: {ticker}",
+            "color": color,
+            "fields": [
+                {"name": "Current Price", "value": f"
+http://googleusercontent.com/immersive_entry_chip/0
+http://googleusercontent.com/immersive_entry_chip/1
+
+---
+
+### 💡 Mengapa Sistem Baru Ini "Gahar"?
+1.  **Smart Filtering:** Bot tidak akan "berisik". Jika tidak ada saham yang menarik (volume sepi/harga flat), bot tidak akan mengirim apa-apa ke Discord.
+2.  **Discord Embeds:** Tampilan di Discord tidak lagi teks biasa, tapi kotak berwarna (Hijau/Merah) dengan kolom-kolom rapi.
+3.  **Visual Chart:** Kamu bisa langsung melihat tren harga lewat gambar yang dikirim bot tanpa harus buka TradingView.
+4.  **Full Free:** Matplotlib gratis, Groq gratis, GitHub Actions gratis.
+
+**Langkah Terakhir:**
+1. Update kedua file di atas di GitHub kamu.
+2. Tunggu 1 jam, atau klik **Run Workflow** secara manual untuk tes.
+
+Apakah kamu ingin saya tambahkan **Pesan Suara (TTS)** atau notifikasi khusus jika ada saham yang "Super Breakout"?
