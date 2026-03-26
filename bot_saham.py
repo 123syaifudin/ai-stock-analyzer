@@ -18,8 +18,28 @@ SCAN_LIST = [
     "AAPL","NVDA","TSLA","META","MSFT","BTC-USD"
 ]
 
+# ================= SAFE DOWNLOAD =================
+def get_data(ticker):
+
+    df = yf.download(
+        ticker,
+        period="3mo",
+        interval="1d",
+        auto_adjust=True,
+        progress=False
+    )
+
+    if df is None or df.empty:
+        return None
+
+    # FIX MULTI INDEX
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    return df
+
 # ================= INDICATOR =================
-def indicator(df):
+def add_indicator(df):
 
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
@@ -32,10 +52,10 @@ def indicator(df):
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    return df
+    return df.dropna()
 
 # ================= CHART =================
-def chart(ticker, df):
+def make_chart(ticker, df):
 
     plt.style.use("dark_background")
     plt.figure(figsize=(10,5))
@@ -56,36 +76,32 @@ def scan():
 
     kandidat = []
 
-    print("Scanning Market Smart V3...")
+    print("Scanning Market V4...")
 
     for ticker in SCAN_LIST:
 
         try:
-            df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+            df = get_data(ticker)
 
-            if df is None or df.empty:
-                print("No data:", ticker)
+            if df is None or len(df) < 50:
+                print("No Data:", ticker)
                 continue
 
-            df = indicator(df)
-            df = df.dropna()
-
-            if len(df) < 30:
-                continue
+            df = add_indicator(df)
 
             last = df.iloc[-1]
 
-            price = float(last["Close"])
-            ema20 = float(last["EMA20"])
-            ema50 = float(last["EMA50"])
-            rsi = float(last["RSI"]) if not np.isnan(last["RSI"]) else 50
+            price = last["Close"].item()
+            ema20 = last["EMA20"].item()
+            ema50 = last["EMA50"].item()
+            rsi = last["RSI"].item()
 
-            volume = float(last["Volume"])
-            avg_vol = float(df["Volume"].tail(20).mean())
+            volume = last["Volume"].item()
+            avg_vol = df["Volume"].tail(20).mean()
 
             vol_ratio = volume / avg_vol if avg_vol > 0 else 1
 
-            high20 = float(df["High"].tail(20).max())
+            high20 = df["High"].tail(20).max()
 
             signal = "SIDEWAYS"
             confidence = 10
@@ -106,7 +122,7 @@ def scan():
                 signal = "OVERBOUGHT"
                 confidence += 20
 
-            if vol_ratio > 1.5:
+            if vol_ratio > 1.3:
                 confidence += 15
 
             if price >= high20:
@@ -124,7 +140,7 @@ def scan():
             print("OK:", ticker, signal, confidence)
 
         except Exception as e:
-            print("Error:", ticker, e)
+            print("ERROR:", ticker, e)
 
     if not kandidat:
         return []
@@ -134,15 +150,13 @@ def scan():
     return kandidat[:3]
 
 # ================= AI =================
-def ai(ticker, price, signal, conf):
+def ai_analysis(ticker, price, signal, conf):
 
     prompt = f"""
     Analisa trading saham {ticker}
     Harga {price}
     Signal {signal}
     Confidence {conf}
-
-    Buat kesimpulan singkat trading plan.
     """
 
     try:
@@ -157,9 +171,9 @@ def ai(ticker, price, signal, conf):
         return "AI gagal."
 
 # ================= DISCORD =================
-def send(data, analisa):
+def send_discord(data, analisa):
 
-    chart(data["ticker"], data["df"])
+    make_chart(data["ticker"], data["df"])
 
     payload = {
         "embeds":[
@@ -190,19 +204,19 @@ def main():
     hasil = scan()
 
     if not hasil:
-        print("Market sangat sepi.")
+        print("Market benar-benar sepi.")
         return
 
     for h in hasil:
 
-        analisa = ai(
+        analisa = ai_analysis(
             h["ticker"],
             h["price"],
             h["signal"],
             h["confidence"]
         )
 
-        send(h, analisa)
+        send_discord(h, analisa)
 
 if __name__ == "__main__":
     main()
