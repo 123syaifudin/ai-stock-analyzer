@@ -1,11 +1,9 @@
 import yfinance as yf
 from groq import Groq
-import os
-import requests
+import os, requests, json
 import pandas as pd
-import matplotlib.pyplot as plt
-import json
 import numpy as np
+import matplotlib.pyplot as plt
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -18,205 +16,186 @@ SCAN_LIST = [
     "AAPL","NVDA","TSLA","META","MSFT","BTC-USD"
 ]
 
-# ================= SAFE DOWNLOAD =================
-def get_data(ticker):
+# ================= MARKET TREND =================
+def market_trend():
 
-    df = yf.download(
-        ticker,
-        period="3mo",
-        interval="1d",
-        auto_adjust=True,
-        progress=False
-    )
+    sp = yf.download("^GSPC", period="1mo", progress=False)
+    btc = yf.download("BTC-USD", period="1mo", progress=False)
 
-    if df is None or df.empty:
-        return None
+    sp_trend = "BULL" if sp["Close"].iloc[-1] > sp["Close"].mean() else "BEAR"
+    btc_trend = "BULL" if btc["Close"].iloc[-1] > btc["Close"].mean() else "BEAR"
 
-    # FIX MULTI INDEX
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    return sp_trend, btc_trend
 
-    return df
+# ================= FEAR GREED =================
+def fear_greed():
+    try:
+        r = requests.get("https://api.alternative.me/fng/")
+        data = r.json()
+        return data["data"][0]["value"], data["data"][0]["value_classification"]
+    except:
+        return "50","Neutral"
 
 # ================= INDICATOR =================
-def add_indicator(df):
+def indicator(df):
 
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
 
     delta = df["Close"].diff()
-
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
 
     rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    df["RSI"] = 100 - (100/(1+rs))
 
     return df.dropna()
 
-# ================= CHART =================
-def make_chart(ticker, df):
+# ================= BACKTEST =================
+def backtest(df):
 
-    plt.style.use("dark_background")
-    plt.figure(figsize=(10,5))
+    wins = 0
+    total = 0
 
-    plt.plot(df.index, df["Close"], label="Price")
-    plt.plot(df.index, df["EMA20"], label="EMA20")
-    plt.plot(df.index, df["EMA50"], label="EMA50")
+    for i in range(60, len(df)-20):
 
-    plt.legend()
-    plt.title(ticker)
-    plt.grid(alpha=0.2)
+        if df["EMA20"].iloc[i] > df["EMA50"].iloc[i] and df["EMA20"].iloc[i-1] <= df["EMA50"].iloc[i-1]:
 
-    plt.savefig("chart.png", bbox_inches="tight")
-    plt.close()
+            entry = df["Close"].iloc[i]
+            future = df["Close"].iloc[i+20]
 
-# ================= SCANNER =================
-def scan():
+            total += 1
 
-    kandidat = []
+            if future > entry*1.03:
+                wins += 1
 
-    print("Scanning Market V4...")
+    if total == 0:
+        return 0
 
-    for ticker in SCAN_LIST:
+    return round((wins/total)*100,2)
 
-        try:
-            df = get_data(ticker)
+# ================= ENTRY TP SL =================
+def trading_plan(df):
 
-            if df is None or len(df) < 50:
-                print("No Data:", ticker)
-                continue
+    last = df.iloc[-1]
 
-            df = add_indicator(df)
+    price = last["Close"]
+    ema20 = last["EMA20"]
+    ema50 = last["EMA50"]
 
-            last = df.iloc[-1]
+    entry = ema20
+    sl = ema50 * 0.99
+    tp = df["High"].tail(30).max()
 
-            price = last["Close"].item()
-            ema20 = last["EMA20"].item()
-            ema50 = last["EMA50"].item()
-            rsi = last["RSI"].item()
+    rr = (tp-entry)/(entry-sl) if entry>sl else 1
 
-            volume = last["Volume"].item()
-            avg_vol = df["Volume"].tail(20).mean()
+    profit = ((tp-entry)/entry)*100
+    loss = ((entry-sl)/entry)*100
 
-            vol_ratio = volume / avg_vol if avg_vol > 0 else 1
+    return entry, tp, sl, rr, profit, loss
 
-            high20 = df["High"].tail(20).max()
-
-            signal = "SIDEWAYS"
-            confidence = 10
-
-            if ema20 > ema50:
-                signal = "BULLISH"
-                confidence += 25
-
-            if ema20 < ema50:
-                signal = "BEARISH"
-                confidence += 25
-
-            if rsi < 30:
-                signal = "OVERSOLD"
-                confidence += 20
-
-            if rsi > 70:
-                signal = "OVERBOUGHT"
-                confidence += 20
-
-            if vol_ratio > 1.3:
-                confidence += 15
-
-            if price >= high20:
-                signal = "BREAKOUT"
-                confidence += 40
-
-            kandidat.append({
-                "ticker":ticker,
-                "price":price,
-                "signal":signal,
-                "confidence":confidence,
-                "df":df.tail(60)
-            })
-
-            print("OK:", ticker, signal, confidence)
-
-        except Exception as e:
-            print("ERROR:", ticker, e)
-
-    if not kandidat:
-        return []
-
-    kandidat = sorted(kandidat, key=lambda x: x["confidence"], reverse=True)
-
-    return kandidat[:3]
-
-# ================= AI =================
-def ai_analysis(ticker, price, signal, conf):
+# ================= AI TWEET =================
+def tweet_ai(ticker, signal, rr):
 
     prompt = f"""
-    Analisa trading saham {ticker}
-    Harga {price}
+    Buat tweet trading menarik branding MisterX.
+    Saham {ticker}
     Signal {signal}
-    Confidence {conf}
+    Risk Reward {rr}
     """
 
     try:
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role":"user","content":prompt}],
-            temperature=0.4,
-            max_tokens=200
+            max_tokens=120
         )
         return chat.choices[0].message.content
     except:
-        return "AI gagal."
+        return "Tweet gagal."
+
+# ================= SCAN =================
+def scan():
+
+    hasil = []
+
+    for ticker in SCAN_LIST:
+
+        try:
+            df = yf.download(ticker, period="6mo", progress=False)
+
+            if df.empty:
+                continue
+
+            df = indicator(df)
+
+            winrate = backtest(df)
+
+            entry,tp,sl,rr,profit,loss = trading_plan(df)
+
+            last = df.iloc[-1]
+
+            signal = "BULLISH" if last["EMA20"]>last["EMA50"] else "BEARISH"
+
+            confidence = 50 + winrate/2
+
+            hasil.append({
+                "ticker":ticker,
+                "price":last["Close"],
+                "signal":signal,
+                "confidence":confidence,
+                "entry":entry,
+                "tp":tp,
+                "sl":sl,
+                "rr":rr,
+                "profit":profit,
+                "loss":loss,
+                "winrate":winrate
+            })
+
+        except:
+            pass
+
+    return sorted(hasil, key=lambda x:x["confidence"], reverse=True)[:3]
 
 # ================= DISCORD =================
-def send_discord(data, analisa):
+def send(data, trend, fear):
 
-    make_chart(data["ticker"], data["df"])
+    tweet = tweet_ai(data["ticker"], data["signal"], data["rr"])
 
     payload = {
         "embeds":[
             {
-                "title":f"SMART SIGNAL {data['ticker']}",
-                "color":3447003,
+                "title":f"🚀 MISTERX SMART SIGNAL {data['ticker']}",
+                "color":15844367,
                 "fields":[
                     {"name":"Signal","value":data["signal"]},
-                    {"name":"Confidence","value":str(data["confidence"])},
-                    {"name":"Price","value":str(round(data["price"],2))},
-                    {"name":"AI","value":analisa[:900]}
-                ],
-                "image":{"url":"attachment://chart.png"}
+                    {"name":"Confidence","value":str(round(data["confidence"],1))},
+                    {"name":"Entry","value":str(round(data["entry"],2))},
+                    {"name":"TP","value":str(round(data["tp"],2))},
+                    {"name":"SL","value":str(round(data["sl"],2))},
+                    {"name":"RR","value":str(round(data["rr"],2))},
+                    {"name":"Winrate","value":str(data["winrate"])+"%"},
+                    {"name":"Market Trend","value":str(trend)},
+                    {"name":"Fear Greed","value":str(fear)},
+                    {"name":"Tweet Idea","value":tweet[:500]}
+                ]
             }
         ]
     }
 
-    with open("chart.png","rb") as f:
-        requests.post(
-            DISCORD_WEBHOOK,
-            data={"payload_json":json.dumps(payload)},
-            files={"file":f}
-        )
+    requests.post(DISCORD_WEBHOOK, json=payload)
 
 # ================= MAIN =================
 def main():
 
+    trend = market_trend()
+    fear = fear_greed()
+
     hasil = scan()
 
-    if not hasil:
-        print("Market benar-benar sepi.")
-        return
-
     for h in hasil:
-
-        analisa = ai_analysis(
-            h["ticker"],
-            h["price"],
-            h["signal"],
-            h["confidence"]
-        )
-
-        send_discord(h, analisa)
+        send(h, trend, fear)
 
 if __name__ == "__main__":
     main()
