@@ -1,8 +1,9 @@
 import yfinance as yf
-from groq import Groq
-import os, requests, time
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import os, requests, time
+from groq import Groq
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -15,77 +16,66 @@ SCAN_LIST = [
     "AAPL","NVDA","TSLA","META","MSFT","BTC-USD"
 ]
 
-# ================= SAFE DOWNLOADER =================
-def safe_download(ticker, period="6mo", retry=3):
-
-    for i in range(retry):
-        try:
-            df = yf.download(ticker, period=period, progress=False)
-
-            if df is None or df.empty:
-                time.sleep(1)
-                continue
-
-            # FIX MULTI INDEX
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-
-            df = df.dropna()
-            df = df.astype(float)
-
-            return df
-
-        except:
-            time.sleep(1)
-
-    return pd.DataFrame()
-
-# ================= MARKET TREND =================
-def market_trend():
-
-    sp = safe_download("^GSPC","1mo")
-    btc = safe_download("BTC-USD","1mo")
-
-    if sp.empty or btc.empty:
-        return "UNKNOWN"
-
-    sp_close = sp["Close"]
-    btc_close = btc["Close"]
-
-    sp_trend = "BULL" if sp_close.iloc[-1] > sp_close.mean() else "BEAR"
-    btc_trend = "BULL" if btc_close.iloc[-1] > btc_close.mean() else "BEAR"
-
-    return f"SP500 {sp_trend} | BTC {btc_trend}"
-
-# ================= FEAR GREED =================
-def fear_greed():
-
+# ================= SAFE DOWNLOAD =================
+def safe_download(ticker):
     try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=10)
-        data = r.json()
-        value = data["data"][0]["value"]
-        status = data["data"][0]["value_classification"]
+        df = yf.download(ticker, period="8mo", progress=False)
 
-        return f"{value} ({status})"
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
 
+        df = df.dropna()
+        df = df.astype(float)
+
+        return df
     except:
-        return "50 (Neutral)"
+        return pd.DataFrame()
 
 # ================= INDICATOR =================
 def indicator(df):
 
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
+    df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    delta = df["Close"].diff()
-
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-
-    rs = gain / loss
-    df["RSI"] = 100 - (100/(1+rs))
+    df["VOL_AVG"] = df["Volume"].rolling(20).mean()
 
     return df.dropna()
+
+# ================= MARKET STRUCTURE =================
+def structure(df):
+
+    high_break = df["High"].iloc[-1] > df["High"].tail(20).max()
+    low_break = df["Low"].iloc[-1] < df["Low"].tail(20).min()
+
+    if high_break:
+        return "BULLISH STRUCTURE"
+    if low_break:
+        return "BEARISH STRUCTURE"
+
+    return "RANGE"
+
+# ================= SWING PLAN =================
+def swing_plan(df):
+
+    last = df.iloc[-1]
+
+    entry = last["EMA20"]
+
+    swing_low = df["Low"].tail(15).min()
+    swing_high = df["High"].tail(40).max()
+
+    sl = swing_low
+    tp = swing_high
+
+    rr = (tp-entry)/(entry-sl) if entry>sl else 0
+
+    vol_spike = last["Volume"] > last["VOL_AVG"] * 1.5
+
+    trend_score = 1 if last["EMA20"]>last["EMA50"] else 0
+    trend_score += 1 if last["EMA50"]>last["EMA200"] else 0
+
+    return entry,tp,sl,rr,vol_spike,trend_score
 
 # ================= BACKTEST =================
 def backtest(df):
@@ -93,16 +83,16 @@ def backtest(df):
     wins = 0
     total = 0
 
-    for i in range(60, len(df)-20):
+    for i in range(100, len(df)-30):
 
-        if df["EMA20"].iloc[i] > df["EMA50"].iloc[i] and df["EMA20"].iloc[i-1] <= df["EMA50"].iloc[i-1]:
+        if df["EMA20"].iloc[i] > df["EMA50"].iloc[i]:
 
             entry = df["Close"].iloc[i]
-            future = df["Close"].iloc[i+20]
+            future = df["Close"].iloc[i+30]
 
             total += 1
 
-            if future > entry * 1.03:
+            if future > entry * 1.05:
                 wins += 1
 
     if total == 0:
@@ -110,44 +100,48 @@ def backtest(df):
 
     return round((wins/total)*100,2)
 
-# ================= TRADING PLAN =================
-def trading_plan(df):
-
-    last = df.iloc[-1]
-
-    entry = last["EMA20"]
-    sl = last["EMA50"] * 0.99
-    tp = df["High"].tail(30).max()
-
-    rr = (tp-entry)/(entry-sl) if entry>sl else 1
-
-    profit = ((tp-entry)/entry)*100
-    loss = ((entry-sl)/entry)*100
-
-    return entry,tp,sl,rr,profit,loss
-
-# ================= AI TWEET =================
-def tweet_ai(ticker, signal, rr):
+# ================= AI FILTER =================
+def ai_filter(data):
 
     prompt = f"""
-    Buat tweet trading branding MisterX.
-    Saham {ticker}
-    Signal {signal}
-    Risk Reward {rr}
+    Kamu analis hedge fund.
+    Ticker {data['ticker']}
+    RR {data['rr']}
+    Winrate {data['winrate']}
+    TrendScore {data['trend']}
+    VolumeSpike {data['vol']}
+    Structure {data['structure']}
+
+    Putuskan:
+    STRONG BUY / WATCHLIST / AVOID
     """
 
     try:
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role":"user","content":prompt}],
-            max_tokens=120
+            max_tokens=10
         )
         return chat.choices[0].message.content
-
     except:
-        return "Stay smart with MisterX trading insight."
+        return "WATCHLIST"
 
-# ================= SCANNER =================
+# ================= CHART =================
+def make_chart(df, ticker):
+
+    plt.figure(figsize=(8,4))
+    plt.plot(df["Close"].tail(120))
+    plt.plot(df["EMA20"].tail(120))
+    plt.plot(df["EMA50"].tail(120))
+    plt.title(ticker)
+
+    filename = f"{ticker}.png"
+    plt.savefig(filename)
+    plt.close()
+
+    return filename
+
+# ================= SCAN =================
 def scan():
 
     results = []
@@ -161,88 +155,81 @@ def scan():
 
         df = indicator(df)
 
+        entry,tp,sl,rr,vol,trend = swing_plan(df)
+
+        if rr < 1:
+            continue
+
         winrate = backtest(df)
+        struct = structure(df)
 
-        entry,tp,sl,rr,profit,loss = trading_plan(df)
-
-        last = df.iloc[-1]
-
-        signal = "BULLISH" if last["EMA20"] > last["EMA50"] else "BEARISH"
-
-        confidence = 50 + winrate/2
+        score = rr*10 + trend*10 + (winrate/5)
 
         results.append({
             "ticker":ticker,
-            "price":last["Close"],
-            "signal":signal,
-            "confidence":confidence,
+            "rr":rr,
             "entry":entry,
             "tp":tp,
             "sl":sl,
-            "rr":rr,
-            "profit":profit,
-            "loss":loss,
-            "winrate":winrate
+            "winrate":winrate,
+            "trend":trend,
+            "vol":vol,
+            "structure":struct,
+            "score":score,
+            "df":df
         })
 
         time.sleep(1)
 
-    results = sorted(results, key=lambda x:x["confidence"], reverse=True)
+    results = sorted(results, key=lambda x:x["score"], reverse=True)
 
     return results[:3]
 
 # ================= DISCORD =================
-def send_discord(data, trend, fear):
+def send_discord(data):
 
-    tweet = tweet_ai(data["ticker"], data["signal"], data["rr"])
+    decision = ai_filter(data)
+
+    chart = make_chart(data["df"], data["ticker"])
+
+    files = {"file": open(chart,"rb")}
 
     payload = {
         "embeds":[
             {
-                "title":f"🚀 MISTERX SMART SIGNAL {data['ticker']}",
-                "color":65280,
+                "title":f"🔥 MISTERX SWING SIGNAL {data['ticker']}",
+                "description":f"AI Verdict: **{decision}**",
+                "color":16753920,
                 "fields":[
-                    {"name":"📊 Signal","value":data["signal"],"inline":True},
-                    {"name":"🎯 Confidence","value":str(round(data["confidence"],1)),"inline":True},
-                    {"name":"🏆 Winrate","value":str(data["winrate"])+"%","inline":True},
-
-                    {"name":"💰 Entry","value":str(round(data["entry"],2)),"inline":True},
-                    {"name":"✅ TP","value":str(round(data["tp"],2)),"inline":True},
-                    {"name":"🛑 SL","value":str(round(data["sl"],2)),"inline":True},
-
-                    {"name":"⚖️ Risk Reward","value":str(round(data["rr"],2)),"inline":True},
-                    {"name":"📈 Profit Potensi","value":str(round(data["profit"],2))+"%","inline":True},
-                    {"name":"📉 Risk Potensi","value":str(round(data["loss"],2))+"%","inline":True},
-
-                    {"name":"🌎 Market Trend","value":trend,"inline":False},
-                    {"name":"😱 Fear Greed","value":fear,"inline":False},
-
-                    {"name":"🐦 MisterX Tweet Idea","value":tweet[:400],"inline":False}
-                ]
+                    {"name":"RR","value":str(round(data["rr"],2))},
+                    {"name":"Winrate","value":str(data["winrate"])+"%"},
+                    {"name":"Structure","value":data["structure"]},
+                    {"name":"Entry","value":str(round(data["entry"],2))},
+                    {"name":"TP","value":str(round(data["tp"],2))},
+                    {"name":"SL","value":str(round(data["sl"],2))}
+                ],
+                "image":{"url":f"attachment://{chart}"}
             }
         ]
     }
 
-    requests.post(DISCORD_WEBHOOK, json=payload)
+    requests.post(DISCORD_WEBHOOK, data={"payload_json":json.dumps(payload)}, files=files)
 
 # ================= MAIN =================
 def main():
 
-    print("Scanning Market...")
-
-    trend = market_trend()
-    fear = fear_greed()
+    print("Scanning Swing Market...")
 
     hasil = scan()
 
     if not hasil:
-        print("Tidak ada signal.")
+        print("Tidak ada signal RR >= 1")
         return
 
     for h in hasil:
-        send_discord(h, trend, fear)
+        send_discord(h)
 
-    print("Signal terkirim ke Discord.")
+    print("Signal terkirim.")
 
 if __name__ == "__main__":
     main()
