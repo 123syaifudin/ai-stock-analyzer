@@ -1,0 +1,27 @@
+name: AI Stock Scanner Daily
+on:
+  schedule:
+    # Jalan setiap Senin-Jumat jam 08:30 WIB (01:30 UTC)
+    - cron: '30 1 * * 1-5'
+  workflow_dispatch: # Tombol manual untuk tes
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Libraries
+        run: pip install -r requirements.txt
+
+      - name: Run Bot
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python bot_saham.py
