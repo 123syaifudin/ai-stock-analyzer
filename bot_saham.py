@@ -4,82 +4,112 @@ import os
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
+import json
+from datetime import datetime
 
-# Konfigurasi
+# --- KONFIGURASI ---
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
-# Daftar Scan (Bisa ditambah sesuai keinginan)
+# Daftar saham (Bisa ditambah/kurang sesukamu)
 SCAN_LIST = [
-    # Indonesia (LQ45 & Popular)
     "BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "GOTO.JK", "ADRO.JK", "AMRT.JK", "ANTM.JK", "BMRI.JK",
-    # US & Crypto
     "AAPL", "NVDA", "TSLA", "MSFT", "META", "BTC-USD", "ETH-USD"
 ]
 
-def create_chart(ticker, hist):
-    plt.figure(figsize=(10, 5))
-    plt.plot(hist.index, hist['Close'], label='Price', color='#00ff00', linewidth=2)
-    plt.fill_between(hist.index, hist['Close'], color='#00ff00', alpha=0.1)
-    plt.title(f"Price Action: {ticker}")
-    plt.grid(True, alpha=0.2)
-    plt.savefig('chart.png')
-    plt.close()
+def create_chart(ticker, hist, support, resistance):
+    """Membuat grafik dengan garis Support & Resistance"""
+    try:
+        plt.style.use('dark_background')
+        plt.figure(figsize=(10, 5))
+        
+        # Plot Harga
+        plt.plot(hist.index, hist['Close'], color='#00ff00', linewidth=2, label='Price')
+        plt.fill_between(hist.index, hist['Close'], color='#00ff00', alpha=0.1)
+        
+        # Plot S/R
+        plt.axhline(y=support, color='red', linestyle='--', alpha=0.5, label=f'Support ({support:.0f})')
+        plt.axhline(y=resistance, color='cyan', linestyle='--', alpha=0.5, label=f'Resistance ({resistance:.0f})')
+        
+        plt.title(f"Scanner Signal: {ticker}", fontsize=14, color='white')
+        plt.legend()
+        plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.2)
+        plt.savefig('chart.png', bbox_inches='tight')
+        plt.close()
+        return True
+    except Exception as e:
+        print(f"Gagal buat chart: {e}")
+        return False
 
-def scanner_potensial():
-    found = []
-    print(f"Memulai Scanning {len(SCAN_LIST)} saham...")
-    
-    # Ambil data sekaligus untuk efisiensi
-    data = yf.download(SCAN_LIST, period="5d", interval="1h", group_by='ticker')
-    
+def scan_market():
+    potensial = []
+    print(f"Scanning {len(SCAN_LIST)} stocks...")
+
     for ticker in SCAN_LIST:
         try:
-            df = data[ticker].dropna()
-            if len(df) < 5: continue
+            stock = yf.Ticker(ticker)
+            # Ambil data 1 jam untuk deteksi spike, dan 1 hari untuk S/R
+            df_hourly = stock.history(period="5d", interval="1h")
+            df_daily = stock.history(period="1mo", interval="1d")
             
-            # LOGIKA SCANNER: Volume naik 1.5x rata-rata ATAU Harga naik > 2%
-            last_vol = df['Volume'].iloc[-1]
-            avg_vol = df['Volume'].mean()
-            price_change = ((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100
+            if df_hourly.empty or len(df_hourly) < 10: continue
+
+            # Hitung Support & Resistance (1 Bulan Terakhir)
+            current_support = df_daily['Low'].min()
+            current_resistance = df_daily['High'].max()
+
+            # Logika Anomali
+            last_close = df_hourly['Close'].iloc[-1]
+            change_pct = ((last_close - df_hourly['Close'].iloc[-2]) / df_hourly['Close'].iloc[-2]) * 100
             
-            if last_vol > (avg_vol * 1.5) or abs(price_change) > 2.0:
-                found.append({
+            last_vol = df_hourly['Volume'].iloc[-1]
+            avg_vol = df_hourly['Volume'].mean()
+            vol_ratio = last_vol / avg_vol if avg_vol > 0 else 0
+
+            # Filter: Volume Spike > 2x ATAU Perubahan Harga > 3%
+            if vol_ratio > 2.0 or abs(change_pct) > 3.0:
+                potensial.append({
                     "ticker": ticker,
-                    "price": df['Close'].iloc[-1],
-                    "change": price_change,
-                    "vol_spike": last_vol / avg_vol,
-                    "hist": df.tail(10)
+                    "price": last_close,
+                    "change": change_pct,
+                    "vol_ratio": vol_ratio,
+                    "support": current_support,
+                    "resistance": current_resistance,
+                    "hist": df_hourly.tail(20),
+                    "news": [n.get('title') for n in stock.news[:2]] if stock.news else ["No news"]
                 })
         except: continue
-    
-    # Urutkan berdasarkan volume spike tertinggi (Top 3 saja agar tidak spam)
-    found = sorted(found, key=lambda x: x['vol_spike'], reverse=True)[:3]
-    return found
+            
+    return sorted(potensial, key=lambda x: x['vol_ratio'], reverse=True)[:3]
 
-def kirim_discord_pro(ticker, analisa, price, change):
-    # Warna: Hijau jika naik, Merah jika turun
-    color = 3066993 if change > 0 else 15158332
+def kirim_discord(data, analisa):
+    color = 3066993 if data['change'] >= 0 else 15158332
     
     payload = {
         "embeds": [{
-            "title": f"🚀 SIGNAL POTENSIAL: {ticker}",
+            "title": f"🚀 ALERT POTENSIAL: {data['ticker']}",
             "color": color,
             "fields": [
-                {"name": "Current Price", "value": f"
+                {
+                    "name": "📊 Data Teknis", 
+                    "value": f"
 http://googleusercontent.com/immersive_entry_chip/0
 http://googleusercontent.com/immersive_entry_chip/1
 
 ---
 
-### 💡 Mengapa Sistem Baru Ini "Gahar"?
-1.  **Smart Filtering:** Bot tidak akan "berisik". Jika tidak ada saham yang menarik (volume sepi/harga flat), bot tidak akan mengirim apa-apa ke Discord.
-2.  **Discord Embeds:** Tampilan di Discord tidak lagi teks biasa, tapi kotak berwarna (Hijau/Merah) dengan kolom-kolom rapi.
-3.  **Visual Chart:** Kamu bisa langsung melihat tren harga lewat gambar yang dikirim bot tanpa harus buka TradingView.
-4.  **Full Free:** Matplotlib gratis, Groq gratis, GitHub Actions gratis.
+### 💡 Apa yang Baru?
 
-**Langkah Terakhir:**
-1. Update kedua file di atas di GitHub kamu.
-2. Tunggu 1 jam, atau klik **Run Workflow** secara manual untuk tes.
+* **Logic Support & Resistance:** Bot sekarang melihat data harian (`1mo`) untuk menentukan titik terendah (Support) dan tertinggi (Resistance) selama sebulan terakhir.
+* **Visual Chart:** Grafik sekarang menyertakan garis putus-putus merah (Support) dan cyan (Resistance). Jadi kamu bisa lihat posisi harga sekarang ada di mana terhadap "benteng" harganya.
+* **Target Lebih Masuk Akal:** AI Groq sekarang dipaksa memberikan **TP di area Resistance** dan **SL di bawah Support**, bukan cuma pakai angka persentase buta.
+* **Format Rapi:** Penambahan kolom khusus "Support & Resistance" di Discord agar mata kamu bisa langsung tertuju ke angka krusial.
 
-Apakah kamu ingin saya tambahkan **Pesan Suara (TTS)** atau notifikasi khusus jika ada saham yang "Super Breakout"?
+---
+
+### Langkah Terakhir
+1.  **Update kode** di GitHub repository kamu.
+2.  Karena kita pakai data harian dan per jam, pastikan **GitHub Actions** kamu berjalan saat bursa sedang aktif atau minimal sehari sekali.
+3.  Jangan lupa cek **GitHub Secrets** apakah `GROQ_API_KEY` dan `DISCORD_WEBHOOK` masih terpasang.
+
+Apakah kamu ingin saya tambahkan **filter saham khusus** (misal: hanya mau scan saham yang harganya di atas Rp 100,- agar tidak terjebak saham "gocap")?
