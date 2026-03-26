@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import os, requests, time
+import os, requests, time, json
 from groq import Groq
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -42,15 +42,13 @@ def indicator(df):
 
     return df.dropna()
 
-# ================= MARKET STRUCTURE =================
+# ================= STRUCTURE =================
 def structure(df):
 
-    high_break = df["High"].iloc[-1] > df["High"].tail(20).max()
-    low_break = df["Low"].iloc[-1] < df["Low"].tail(20).min()
-
-    if high_break:
+    if df["High"].iloc[-1] > df["High"].tail(20).max():
         return "BULLISH STRUCTURE"
-    if low_break:
+
+    if df["Low"].iloc[-1] < df["Low"].tail(20).min():
         return "BEARISH STRUCTURE"
 
     return "RANGE"
@@ -61,19 +59,18 @@ def swing_plan(df):
     last = df.iloc[-1]
 
     entry = last["EMA20"]
-
-    swing_low = df["Low"].tail(15).min()
-    swing_high = df["High"].tail(40).max()
-
-    sl = swing_low
-    tp = swing_high
+    sl = df["Low"].tail(15).min()
+    tp = df["High"].tail(40).max()
 
     rr = (tp-entry)/(entry-sl) if entry>sl else 0
 
     vol_spike = last["Volume"] > last["VOL_AVG"] * 1.5
 
-    trend_score = 1 if last["EMA20"]>last["EMA50"] else 0
-    trend_score += 1 if last["EMA50"]>last["EMA200"] else 0
+    trend_score = 0
+    if last["EMA20"] > last["EMA50"]:
+        trend_score += 1
+    if last["EMA50"] > last["EMA200"]:
+        trend_score += 1
 
     return entry,tp,sl,rr,vol_spike,trend_score
 
@@ -105,15 +102,11 @@ def ai_filter(data):
 
     prompt = f"""
     Kamu analis hedge fund.
-    Ticker {data['ticker']}
     RR {data['rr']}
     Winrate {data['winrate']}
     TrendScore {data['trend']}
     VolumeSpike {data['vol']}
     Structure {data['structure']}
-
-    Putuskan:
-    STRONG BUY / WATCHLIST / AVOID
     """
 
     try:
@@ -129,17 +122,18 @@ def ai_filter(data):
 # ================= CHART =================
 def make_chart(df, ticker):
 
-    plt.figure(figsize=(8,4))
-    plt.plot(df["Close"].tail(120))
-    plt.plot(df["EMA20"].tail(120))
-    plt.plot(df["EMA50"].tail(120))
+    plt.figure(figsize=(9,4))
+    plt.plot(df["Close"].tail(120), label="Price")
+    plt.plot(df["EMA20"].tail(120), label="EMA20")
+    plt.plot(df["EMA50"].tail(120), label="EMA50")
+    plt.legend()
     plt.title(ticker)
 
-    filename = f"{ticker}.png"
-    plt.savefig(filename)
+    file = f"{ticker}.png"
+    plt.savefig(file)
     plt.close()
 
-    return filename
+    return file
 
 # ================= SCAN =================
 def scan():
@@ -163,7 +157,7 @@ def scan():
         winrate = backtest(df)
         struct = structure(df)
 
-        score = rr*10 + trend*10 + (winrate/5)
+        score = rr*10 + trend*10 + winrate/5
 
         results.append({
             "ticker":ticker,
@@ -188,8 +182,7 @@ def scan():
 # ================= DISCORD =================
 def send_discord(data):
 
-    decision = ai_filter(data)
-
+    verdict = ai_filter(data)
     chart = make_chart(data["df"], data["ticker"])
 
     files = {"file": open(chart,"rb")}
@@ -197,23 +190,28 @@ def send_discord(data):
     payload = {
         "embeds":[
             {
-                "title":f"🔥 MISTERX SWING SIGNAL {data['ticker']}",
-                "description":f"AI Verdict: **{decision}**",
-                "color":16753920,
+                "title":f"🚀 MISTERX SWING SIGNAL {data['ticker']}",
+                "description":f"🤖 AI Verdict: **{verdict}**",
+                "color":65280,
                 "fields":[
-                    {"name":"RR","value":str(round(data["rr"],2))},
-                    {"name":"Winrate","value":str(data["winrate"])+"%"},
-                    {"name":"Structure","value":data["structure"]},
-                    {"name":"Entry","value":str(round(data["entry"],2))},
-                    {"name":"TP","value":str(round(data["tp"],2))},
-                    {"name":"SL","value":str(round(data["sl"],2))}
+                    {"name":"📊 Risk Reward","value":str(round(data["rr"],2)),"inline":True},
+                    {"name":"🏆 Winrate","value":str(data["winrate"])+"%","inline":True},
+                    {"name":"🧱 Structure","value":data["structure"],"inline":True},
+
+                    {"name":"💰 Entry","value":str(round(data["entry"],2)),"inline":True},
+                    {"name":"✅ TP","value":str(round(data["tp"],2)),"inline":True},
+                    {"name":"🛑 SL","value":str(round(data["sl"],2)),"inline":True}
                 ],
                 "image":{"url":f"attachment://{chart}"}
             }
         ]
     }
 
-    requests.post(DISCORD_WEBHOOK, data={"payload_json":json.dumps(payload)}, files=files)
+    requests.post(
+        DISCORD_WEBHOOK,
+        data={"payload_json": json.dumps(payload)},
+        files=files
+    )
 
 # ================= MAIN =================
 def main():
@@ -229,7 +227,7 @@ def main():
     for h in hasil:
         send_discord(h)
 
-    print("Signal terkirim.")
+    print("Signal terkirim ke Discord.")
 
 if __name__ == "__main__":
     main()
